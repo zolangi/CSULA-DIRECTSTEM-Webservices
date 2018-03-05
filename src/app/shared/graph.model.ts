@@ -1,4 +1,6 @@
 import * as d3 from 'd3';
+import {Project} from './models/project.model';
+import {ProjectService} from './services/project.service'
 import {Node} from './models/node.model';
 import {Edge} from './models/edge.model';
 import {View} from './view.model';
@@ -36,8 +38,11 @@ export class Graph {
   stack;
   parentNode;
   state;
+  project;
+  projectService;
+  dragged;
 
-  constructor(svgIn: any, nodes: Node[], edges: Edge[]) {
+  constructor(svgIn: any, nodes: Node[], edges: Edge[], project: Project, projectService: ProjectService) {
     // for clarity: typing this over and over can be confusing
     const thisGraph = this;
 
@@ -54,6 +59,10 @@ export class Graph {
     this.stack = [];
     //this.parentNode = parentNode;
     this.parentNode = [];
+    this.project = project; // for callbacks
+    this.projectService = projectService;
+
+    this.dragged = false;
 
     // View of the graph (selected nodes, links, etc..)
     this.state = {
@@ -134,6 +143,7 @@ export class Graph {
     if (thisGraph.state.shiftNodeDrag) {
       thisGraph.dragLine.attr('d', 'M' + d.x + ',' + d.y + 'L' + d3.mouse(thisGraph.svgG.node())[0] + ',' + d3.mouse(this.svgG.node())[1]);
     } else {
+      this.dragged = true;
       d.x += (d3.event as any).dx;
       d.y += (d3.event as any).dy;
       thisGraph.updateGraph();
@@ -158,25 +168,6 @@ export class Graph {
       this.clickNodes.splice(index, 1);
     }
     this.updateGraph();
-  }
-
-  /** Add the clickNodes as children to the input node.*/
-  compositeClickNodes(node: Node): void {
-    // Removes the clickNodes from the graph nodes
-    this.clickNodes.forEach((n: Node) => {
-      this.nodes.splice(this.nodes.indexOf(n), 1);
-      // Remove all edges originating from this node from this graph view.
-      this.spliceLinksFormNode(n);
-      // Remove the node from all neighbors field
-      // but not if its is associated with a clickNodes
-      //this.removeNeighborsToClickNodes();
-      //this.removeNonClickNeighbors();
-    });
-
-    // Add the clickNodes as children to the input node.
-    //node.children = this.clickNodes;
-    this.clickNodes = [];
-    this.insertNode(node);
   }
 
   /** Toggle the path/link/edge selected css.
@@ -288,7 +279,9 @@ export class Graph {
 
     if (mouseDownNode !== d) {
       // we're in a different node: create new edge for mousedown edge and add to graph
-      const newEdge = {source: mouseDownNode, target: d};
+      var source_index = this.nodes.findIndex((n: Node) => n.id == mouseDownNode.id);
+      var target_index = this.nodes.findIndex((n: Node) => n.id == d.id);
+      const newEdge = {source: source_index, target: target_index};
 
       // Get all the edges from the graph that is the same as newEdge
       const filtRes = thisGraph.paths.filter(function(_d) {
@@ -298,7 +291,7 @@ export class Graph {
         //     thisGraph.edges.splice(thisGraph.edges.indexOf(d), 1);
         // }
 
-        return _d.source === newEdge.source && _d.target === newEdge.target;
+        return _d.source == newEdge.source && _d.target == newEdge.target;
       });
 
       // if the edge is not a duplicate, add it to the graph
@@ -306,6 +299,9 @@ export class Graph {
         // mouseDownNode.neighbors.push(d);
         thisGraph.edges.push(newEdge);
         thisGraph.updateGraph();
+
+        // callback to the project and try to update/save it with the new edge
+        this.projectService.updateProjectToService(this.project);
       }
 
     } else {
@@ -320,9 +316,31 @@ export class Graph {
       } else {
         thisGraph.removeSelectFromNode();
       }
+
+      if(this.dragged) {
+        this.dragged = false;
+
+        // callback to the project and try to update/save it
+        this.projectService.updateProjectToService(this.project);
+      }
     }
 
     state.mouseDownNode = null;
+  }
+
+  updateSelectedNodeTime(time, node) {
+    if(node == null) // what???
+      return;
+
+    console.log("UPDATING NODE TIME");
+    var index = this.nodes.findIndex((n: Node) => n.id == node.id);
+    this.nodes[index].time_text = time.toFixed(2) + "ms";
+    this.nodes[index].just_benchmarked = true;
+
+    // callback to the project and try to update/save it
+    this.projectService.updateProjectToService(this.project);
+
+    this.updateGraph();
   }
 
   /** Remove all the edges associated with a node.
@@ -390,19 +408,39 @@ export class Graph {
     const thisGraph = this;
     const state = thisGraph.state;
 
-    const selectedNode = state.selectedNode;
+    const node = state.selectedNode;
 
     /* Can only delete selected node that are not an input/output node. */
-    if (selectedNode && Node.isRegular(selectedNode)) {
+    if (node) {
       /* Remove the node form the list. */
-      thisGraph.nodes.splice(thisGraph.nodes.indexOf(selectedNode), 1);
+      var node_index = thisGraph.nodes.indexOf(node);
+      thisGraph.removeEdgesWithNodeIndex(node_index);
+      thisGraph.nodes.splice(node_index, 1);
       /* Remove all edges originating from this node. */
-      thisGraph.spliceLinksFormNode(selectedNode);
+      //thisGraph.removeEdgesWithNode(node);
+      //thisGraph.spliceLinksFormNode(selectedNode);
       /* Remove the node from all neighbors field */
       //this.removeFromNeighbor(selectedNode);
-      state.selectedNode = null;
+      thisGraph.state.selectedNode = null;
       thisGraph.updateGraph();
+
+      // callback to the project and try to update/save it
+      this.projectService.updateProjectToService(this.project);
     }
+  }
+
+  removeEdgesWithNodeIndex(node_index) {
+    console.log("Removing edges with node index");
+    if (node_index > -1) {
+      const to_purge = this.edges.filter(edge => edge.source == node_index || edge.target == node_index);
+      to_purge.forEach(edge => {
+        var edge_index = this.edges.indexOf(edge);
+        this.edges.splice(edge_index, 1);
+        //this.paths.splice(edge_index, 1);
+      });
+      console.log("Purged " + to_purge.length + " edges");
+    }
+    console.log("There are " + this.edges.length + " edges remaining");
   }
 
   removeSelectedEdge(): void {
@@ -504,7 +542,8 @@ export class Graph {
 
   /** Used for angular 2 to insert a node*/
   insertNode(node: Node) {
-    this.nodes.push(node);
+    if(this.nodes.findIndex((n: Node) => n.id == node.id) == -1)
+      this.nodes.push(node);
     this.updateGraph();
   }
 
@@ -519,7 +558,7 @@ export class Graph {
       return this.copyObject(node);
     });
 
-    return new View(nodes, this.parentNode);
+    return new View([this.project], this.project);
   }
 
 
@@ -538,12 +577,12 @@ export class Graph {
     // for convinces
     const thisGraph = this;
     const state = this.state;
-
+    const nodes = this.nodes;
 
     // update the paths : paths = ...selectAll("g")
     thisGraph.paths = thisGraph.paths
                           .data(thisGraph.edges, function(d) {
-                            return d.source.id + '+' + d.target.id;
+                            return d.source + '+' + d.target;
                           });
 
     // For convinces: the updateToService selection
@@ -555,7 +594,8 @@ export class Graph {
           return d === state.selectedEdge;
         })
         .attr('d', function(d) {
-          return 'M' + d.source.x + ',' + d.source.y + 'L' + d.target.x + ',' + d.target.y;
+          // fixes updating edges when node is being dragged
+          return 'M' + nodes[d.source].x + ',' + nodes[d.source].y + 'L' + nodes[d.target].x + ',' + nodes[d.target].y;
         });
 
     // Add new paths: the enter selection
@@ -564,7 +604,8 @@ export class Graph {
         .style('marker-end', 'url(#end-arrow)')
         .classed('link', true)
         .attr('d', function(d) {
-          return 'M' + d.source.x + ',' + d.source.y + 'L' + d.target.x + ',' + d.target.y;
+          // fixes updating edges when node is being dragged
+          return 'M' + nodes[d.source].x + ',' + nodes[d.source].y + 'L' + nodes[d.target].x + ',' + nodes[d.target].y;
         })
         .on('mousedown', function(d) {
           thisGraph.pathMouseDown.call(thisGraph, d3.select(this), d);
@@ -576,7 +617,7 @@ export class Graph {
 
     // update the circle selection
     thisGraph.circles = thisGraph.circles
-                            .data(thisGraph.nodes, function(d) {
+                            .data(nodes, function(d) {
                               return String(d.id);
                             });
 
@@ -591,6 +632,21 @@ export class Graph {
           return thisGraph.clickNodes.findIndex((n: Node) => n.id === d.id) !== -1;
         });
         */
+
+    // update the current subtitle of all nodes that have just been benchmarked
+    thisGraph.circles
+             .selectAll("text")
+             .forEach(t => {
+                // uncomment the line below if you end up adding more texts to the node
+                //var updateC = t[t.findIndex(b => b.id == "subtitle")];
+                // TODO: hard-coding is BAD! Need to optimize the routine above.
+                var updateC = t[1];
+                var updateN = nodes[nodes.findIndex(n => n.id == updateC.__data__.id)];
+                if(updateN.just_benchmarked) {
+                  updateC.textContent = "(" + updateN.time_text + ")";
+                  updateN.just_benchmarked = false;
+                }
+              });
 
     // add new circles to the graph(they are wrapped in <g>)
     const newGs = thisGraph.circles.enter()
@@ -632,16 +688,16 @@ export class Graph {
         .text(function(d) {
           return Node.nodeTitle(d);
         });
-    /*
     newGs.append('text')
         .classed('children', true)
+        .attr('id', 'subtitle')
         .attr('text-anchor', 'middle')
         .attr('y', 30)
         .text(d => {
-          if (d.children.length > 0) {
-            return `(${d.children.length})`;
+          if (d.time_text != null && d.time_text.length > 0) {
+            return `(${d.time_text})`;
           }
-        });*/
+        });
 
     // remove old nodes;
     thisGraph.circles.exit().remove();
